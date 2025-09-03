@@ -50,11 +50,14 @@ if [ "$ENABLE_PROXY" = "true" ]; then
   for svc in $H_LOCAL_SERVICE; do
     svc_trim=$(echo "$svc" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     [ -z "$svc_trim" ] && continue
+    # unique template name per service; sanitize for haproxy server name
+    svc_id=$(echo "$svc_trim" | tr -c 'A-Za-z0-9_-' '_')
+    line="  server-template loc_${svc_id} 1-8 tasks.${svc_trim}:${H_PORT} resolvers docker resolve-prefer ipv4 init-addr none weight 100"
     if [ -z "$LOC_LINES" ]; then
-      LOC_LINES="  server-template loc 1-8 tasks.${svc_trim}:${H_PORT} resolvers docker resolve-prefer ipv4 init-addr none weight 100"
+      LOC_LINES="$line"
     else
       LOC_LINES="$LOC_LINES
-  server-template loc 1-8 tasks.${svc_trim}:${H_PORT} resolvers docker resolve-prefer ipv4 init-addr none weight 100"
+$line"
     fi
   done
   IFS="$OLD_IFS"
