@@ -43,13 +43,11 @@ if [ "$ENABLE_PROXY" = "true" ]; then
   H_REMOTE_SERVICE=${VOLS3_PROXY_REMOTE_SERVICE:-"minio-remote"}
   H_PORT=${VOLS3_PROXY_BACKEND_PORT:-"9000"}
   H_HEALTH_PATH=${VOLS3_PROXY_HEALTH_PATH:-"/minio/health/ready"}
-  # Build multiple local service templates if comma-separated
+  # Build multiple local service templates if comma-separated (avoid set -- pollution)
   LOC_LINES=""
   OLD_IFS="$IFS"
   IFS=','
-  set -- $H_LOCAL_SERVICE
-  IFS="$OLD_IFS"
-  for svc in "$@"; do
+  for svc in $H_LOCAL_SERVICE; do
     svc_trim=$(echo "$svc" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     [ -z "$svc_trim" ] && continue
     if [ -z "$LOC_LINES" ]; then
@@ -59,6 +57,7 @@ if [ "$ENABLE_PROXY" = "true" ]; then
   server-template loc 1-8 tasks.${svc_trim}:${H_PORT} resolvers docker resolve-prefer ipv4 init-addr none weight 100"
     fi
   done
+  IFS="$OLD_IFS"
   RMT_LINE=""
   if [ -n "$H_REMOTE_SERVICE" ]; then
     RMT_LINE="  server-template rmt 1-8 tasks.${H_REMOTE_SERVICE}:${H_PORT} resolvers docker resolve-prefer ipv4 init-addr none backup weight 10"
@@ -119,10 +118,10 @@ command=/usr/local/bin/volume-ops
 autorestart=true
 priority=20
 SUPV
+  # Explicitly exec supervisord (do not rely on CMD and do not exec "$@")
+  exec /usr/bin/supervisord -c "$SUPERVISOR_CONF"
 else
   # 无代理：直接运行 volume-ops，绕过 supervisor
   exec /usr/local/bin/volume-ops
 fi
-
-exec "$@"
 
