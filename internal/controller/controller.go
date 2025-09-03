@@ -396,7 +396,7 @@ func (c *Controller) ensureRShared() error {
 	// Use host namespace via nsenter available in main image (util-linux preinstalled)
 	sh := fmt.Sprintf("nsenter -t 1 -m -- mount --make-rshared %s || mount --make-rshared %s", c.cfg.Mountpoint, c.cfg.Mountpoint)
 	cont, err := c.cli.ContainerCreate(c.ctx,
-		&container.Config{Image: c.cfg.HelperImage, Cmd: []string{"sh", "-c", sh}},
+		&container.Config{Image: c.helperImageRef(), Cmd: []string{"sh", "-c", sh}},
 		&container.HostConfig{Privileged: true, PidMode: "host", Binds: []string{fmt.Sprintf("%s:%s", c.cfg.Mountpoint, c.cfg.Mountpoint)}},
 		&network.NetworkingConfig{}, nil, c.helperName("rshared-helper"))
 	if err != nil {
@@ -415,7 +415,7 @@ func (c *Controller) checkAndHealMount() error {
 	}
 	sh := fmt.Sprintf("(nsenter -t 1 -m -- fusermount -uz %[1]s || true); (nsenter -t 1 -m -- umount -l %[1]s || true)", c.cfg.Mountpoint)
 	cont, err := c.cli.ContainerCreate(c.ctx,
-		&container.Config{Image: c.cfg.HelperImage, Cmd: []string{"sh", "-c", sh}},
+		&container.Config{Image: c.helperImageRef(), Cmd: []string{"sh", "-c", sh}},
 		&container.HostConfig{Privileged: true, PidMode: "host", Binds: []string{fmt.Sprintf("%s:%s", c.cfg.Mountpoint, c.cfg.Mountpoint)}},
 		&network.NetworkingConfig{}, nil, c.helperName("umount-helper"))
 	if err != nil {
@@ -807,7 +807,7 @@ func (c *Controller) Preflight() error {
 	// Helper image nsenter availability (best-effort)
 	name := c.helperName("nsenter-check")
 	cont, err := c.cli.ContainerCreate(c.ctx,
-		&container.Config{Image: c.cfg.HelperImage, Cmd: []string{"sh", "-lc", "nsenter --version >/dev/null 2>&1 || exit 1"}},
+		&container.Config{Image: c.helperImageRef(), Cmd: []string{"sh", "-lc", "nsenter --version >/dev/null 2>&1 || exit 1"}},
 		&container.HostConfig{}, &network.NetworkingConfig{}, nil, name)
 	if err == nil {
 		_ = c.cli.ContainerStart(c.ctx, cont.ID, container.StartOptions{})
@@ -980,4 +980,40 @@ func (c *Controller) buildPresetArgs() []string {
 	default:
 		return nil
 	}
+}
+
+// helperImageRef returns the image to use for helper containers.
+// If cfg.HelperImage is empty, it tries to use the current controller's image reference.
+func (c *Controller) helperImageRef() string {
+	if strings.TrimSpace(c.cfg.HelperImage) != "" {
+		return c.cfg.HelperImage
+	}
+	// cached
+	if c.selfImageRef != "" {
+		return c.selfImageRef
+	}
+	// Discover our own container by matching process PID inside Docker (best-effort via cgroup)
+	// Strategy: read /proc/self/cgroup, extract container ID, then inspect to get image
+	data, err := os.ReadFile("/proc/self/cgroup")
+	if err == nil {
+		lines := strings.Split(string(data), "\n")
+		for _, ln := range lines {
+			// typical formats include "/docker/<id>" or "/system.slice/docker-<id>.scope"
+			if i := strings.LastIndex(ln, "/"); i >= 0 {
+				id := strings.TrimSpace(ln[i+1:])
+				id = strings.TrimSuffix(id, ".scope")
+				id = strings.TrimPrefix(id, "docker-")
+				if len(id) >= 12 {
+					if insp, err := c.cli.ContainerInspect(c.ctx, id); err == nil {
+						c.selfImageRef = insp.Config.Image
+						if strings.TrimSpace(c.selfImageRef) != "" {
+							return c.selfImageRef
+						}
+					}
+				}
+			}
+		}
+	}
+	// Fallback: use our published default image (may require pull)
+	return "ghcr.io/swarmnative/volume-s3:latest"
 }
