@@ -964,3 +964,19 @@ func ValidateConfig(cfg Config) ValidationResult {
 	}
 	return ValidationResult{OK: len(errs) == 0, Errors: errs, Warnings: warns, Summary: sum}
 }
+
+func (c *Controller) buildPresetArgs() []string {
+	p := strings.ToLower(strings.TrimSpace(c.cfg.Preset))
+	switch p {
+	case "aws":
+		return []string{"--s3-region=us-east-1"}
+	case "minio", "ceph":
+		return []string{"--s3-force-path-style=true"}
+	case "wasabi":
+		return []string{"--s3-region=us-east-1", "--s3-force-path-style=true"}
+	case "aliyun":
+		return []string{"--s3-provider=Alibaba", "--s3-force-path-style=true"}
+	default:
+		return nil
+	}
+}
