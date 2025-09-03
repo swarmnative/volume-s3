@@ -11,11 +11,12 @@ if [ "$(id -u)" = "0" ]; then
         addgroup -g "$GID" dockersock >/dev/null 2>&1 || true
       fi
       GRP_NAME=$(getent group "$GID" | cut -d: -f1 || echo "dockersock")
-      adduser app "$GRP_NAME" >/dev/null 2>&1 || true
+      # add app user into the docker socket group (BusyBox: addgroup USER GROUP)
+      addgroup app "$GRP_NAME" >/dev/null 2>&1 || true
     fi
   fi
-  # re-exec as app preserving env
-  exec su-exec app:app /entrypoint.sh "$@"
+  # re-exec as app preserving env, initialize supplementary groups
+  exec setpriv --reuid app --regid app --init-groups /entrypoint.sh "$@"
 fi
 
 # Preflight checks (best-effort with clear warnings)
