@@ -1,0 +1,180 @@
+version: "3.8"
+
+# stack: minio+console+volume-s3 (single stack, x-minio-common)
+# purpose:
+#   - 部署分布式 MinIO（不启用每节点 Console）+ 统一 HAProxy 入口 + 独立 opens3/console
+#   - 全局部署 volume-s3，提供基于 S3 的“类 K8s Volume”体验与容器漂移
+# audit:
+#   - 宿主机目录：/srv/docker/volumes/minio{1..4}（数据），/mnt/s3（统一挂载点）
+#   - 机密：s3_access_key、s3_secret_key（Docker secrets）
+#   - 入口：HAProxy 9000（S3），Console 9090（opens3/console）
+# usage:
+#   1) 节点打标：
+#      docker node update --label-add minio1=true <NODE1>
+#      docker node update --label-add minio2=true <NODE2>
+#      docker node update --label-add minio3=true <NODE3>
+#      docker node update --label-add minio4=true <NODE4>
+#      docker node update --label-add s3-mounter=true <NODE_NEED_MOUNT>  # 全局挂载节点
+#   2) 创建 Secrets：
+#      echo -n "<AK>" | docker secret create s3_access_key -
+#      echo -n "<SK>" | docker secret create s3_secret_key -
+#   3) 部署：
+#      docker stack deploy -c examples/stack-minio-mounter.yml s3
+#   4) 业务服务使用：labels 声明 并 bind 挂载 /mnt/s3/<prefix>
+#      labels:
+#        - s3.enabled=true
+#        - s3.prefix=teams/appA/data
+#      volumes:
+#        - type: bind
+#          source: /mnt/s3/teams/appA/data
+#          target: /data
+
+x-minio-common: &minio-svc
+  image: minio/minio:latest
+  command: server /data --address :9000 http://minio1/data http://minio2/data http://minio3/data http://minio4/data
+  environment:
+    - MINIO_ROOT_USER_FILE=/run/secrets/s3_access_key
+    - MINIO_ROOT_PASSWORD_FILE=/run/secrets/s3_secret_key
+  secrets: [s3_access_key, s3_secret_key]
+  networks: [s3_net]
+
+networks:
+  s3_net:
+    driver: overlay
+    attachable: true
+
+secrets:
+  s3_access_key:
+    external: true
+  s3_secret_key:
+    external: true
+
+services:
+  # 一次性准备宿主机目录（每节点执行一次）
+  host-prep:
+    image: alpine:3.20
+    command: sh -c '
+      mkdir -p /host-srv/minio1 /host-srv/minio2 /host-srv/minio3 /host-srv/minio4 &&
+      mkdir -p /host-mnt/s3 || true
+    '
+    volumes:
+      - /srv/docker/volumes:/host-srv
+      - /mnt:/host-mnt
+    deploy:
+      mode: global
+      restart_policy: { condition: none }
+
+  # 分布式 MinIO（不启用节点内置 Console；入口走 minio-lb）
+  minio1:
+    <<: *minio-svc
+    volumes:
+      - /srv/docker/volumes/minio1:/data
+    deploy:
+      placement:
+        constraints: [node.labels.minio1 == true]
+
+  minio2:
+    <<: *minio-svc
+    volumes:
+      - /srv/docker/volumes/minio2:/data
+    deploy:
+      placement:
+        constraints: [node.labels.minio2 == true]
+
+  minio3:
+    <<: *minio-svc
+    volumes:
+      - /srv/docker/volumes/minio3:/data
+    deploy:
+      placement:
+        constraints: [node.labels.minio3 == true]
+
+  minio4:
+    <<: *minio-svc
+    volumes:
+      - /srv/docker/volumes/minio4:/data
+    deploy:
+      placement:
+        constraints: [node.labels.minio4 == true]
+
+  # 统一入口：HAProxy（客户端与 console 都连这里，避免单点）
+  minio-lb:
+    image: haproxy:2.8-alpine
+    command: >
+      sh -lc 'cat >/usr/local/etc/haproxy/haproxy.cfg <<EOF
+      global
+        maxconn 2048
+      defaults
+        mode http
+        timeout connect 5s
+        timeout client  30s
+        timeout server  30s
+        option http-keep-alive
+      frontend s3
+        bind *:9000
+        default_backend be_minio
+      backend be_minio
+        balance leastconn
+        option httpchk GET /minio/health/ready
+        http-check expect status 200
+        server m1 minio1:9000 check
+        server m2 minio2:9000 check
+        server m3 minio3:9000 check
+        server m4 minio4:9000 check
+      EOF
+      exec haproxy -f /usr/local/etc/haproxy/haproxy.cfg'
+    networks: [s3_net]
+    ports:
+      - "9000:9000"
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+
+  # 独立 opens3/console（连接 LB，非直连某一节点）
+  console:
+    image: opens3/console:latest
+    environment:
+      - MINIO_ENDPOINT=http://minio-lb:9000
+      - MINIO_ROOT_USER_FILE=/run/secrets/s3_access_key
+      - MINIO_ROOT_PASSWORD_FILE=/run/secrets/s3_secret_key
+    secrets: [s3_access_key, s3_secret_key]
+    networks: [s3_net]
+    ports:
+      - "9090:9090"
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+
+  # 全局 volume-s3（类 K8s volume 体验 + 漂移）
+  volume-s3:
+    image: ghcr.io/swarmnative/volume-s3:latest
+    networks: [s3_net]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - type: bind
+        source: /mnt/s3
+        target: /mnt/s3
+        bind: { propagation: rshared }
+    secrets: [s3_access_key, s3_secret_key]
+    environment:
+      - VOLS3_PROXY_ENABLE=true
+      - VOLS3_PROXY_ENGINE=haproxy
+      - VOLS3_PROXY_LOCAL_SERVICES=minio1,minio2,minio3,minio4
+      - VOLS3_PROXY_BACKEND_PORT=9000
+      - VOLS3_PROXY_HEALTH_PATH=/minio/health/ready
+      - VOLS3_RCLONE_REMOTE=S3:mybucket
+      - VOLS3_MOUNTPOINT=/mnt/s3
+      - VOLS3_ACCESS_KEY_FILE=/run/secrets/s3_access_key
+      - VOLS3_SECRET_KEY_FILE=/run/secrets/s3_secret_key
+      - VOLS3_RCLONE_ARGS=--vfs-cache-mode=writes --dir-cache-time=12h
+      - VOLS3_UNMOUNT_ON_EXIT=true
+      - VOLS3_AUTOCREATE_PREFIX=true
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.labels.s3-mounter == true
+
+

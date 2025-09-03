@@ -1,0 +1,176 @@
+name: publish
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 3 * * *'  # nightly
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  IMAGE_NAME_GHCR: ghcr.io/${{ github.repository }}
+  IMAGE_NAME_DH: docker.io/${{ github.repository }}
+  RCLONE_IMAGE: rclone/rclone:latest
+
+jobs:
+  go-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+      - name: Harden Go module proxy/cache
+        run: |
+          go env -w GOPROXY=https://proxy.golang.org,direct
+          go env -w GOSUMDB=sum.golang.org
+          go clean -modcache
+      - name: Regenerate go.sum (ephemeral)
+        run: |
+          rm -f go.sum || true
+          go mod tidy
+          go mod download
+      - name: Go mod download
+        run: go mod download
+      - name: Lint (golangci-lint)
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m --modules-download-mode=mod
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -v ./...
+
+  build-and-push:
+    needs: go-ci
+    runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to Docker Hub (optional)
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Compute tags/labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_NAME_GHCR }}
+            ${{ env.IMAGE_NAME_DH }}
+          tags: |
+            type=ref,event=tag
+            type=ref,event=branch
+            type=sha,format=short,enable=${{ github.event_name != 'pull_request' }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') || github.ref_name == 'main' }}
+            type=raw,value=nightly,enable=${{ github.event_name == 'schedule' }}
+
+      - name: Compute dependency fingerprint (nightly only)
+        id: fp
+        if: ${{ github.event_name == 'schedule' }}
+        run: |
+          set -euo pipefail
+          get_digest() { docker buildx imagetools inspect "$1" | awk '/Digest:/ {print $2; exit}'; }
+          ALPINE_DIGEST=$(get_digest alpine:3.20)
+          GOLANG_DIGEST=$(get_digest golang:1.22-alpine)
+          RCLONE_DIGEST=$(get_digest "${RCLONE_IMAGE}")
+          HAPROXY_VER=$(docker run --rm alpine:3.20 sh -c 'apk update >/dev/null 2>&1; apk info -a haproxy | head -1' | tr -d '\r')
+          FP_SRC="alpine=${ALPINE_DIGEST}|golang=${GOLANG_DIGEST}|rclone=${RCLONE_DIGEST}|haproxy=${HAPROXY_VER}"
+          FP_SHA=$(printf "%s" "$FP_SRC" | sha256sum | awk '{print $1}')
+          echo "source=$FP_SRC" >> $GITHUB_OUTPUT
+          echo "sha=$FP_SHA" >> $GITHUB_OUTPUT
+
+      - name: Prepare nightly tags (schedule only)
+        id: extratags
+        if: ${{ github.event_name == 'schedule' }}
+        run: |
+          {
+            echo "list<<EOF"
+            echo "${{ env.IMAGE_NAME_GHCR }}:fp-${{ steps.fp.outputs.sha }}"
+            echo "${{ env.IMAGE_NAME_DH }}:fp-${{ steps.fp.outputs.sha }}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check existing fingerprint tag (GHCR)
+        id: check
+        if: ${{ github.event_name == 'schedule' }}
+        continue-on-error: true
+        run: |
+          docker manifest inspect ${{ env.IMAGE_NAME_GHCR }}:fp-${{ steps.fp.outputs.sha }} >/dev/null 2>&1
+
+      - name: Skip if no changes (nightly)
+        if: ${{ github.event_name == 'schedule' && steps.check.outcome == 'success' }}
+        run: |
+          echo "Fingerprint unchanged: ${{ steps.fp.outputs.sha }}. Skipping build."
+          exit 0
+
+      - name: Build and Push (multi-arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            ${{ steps.extratags.outputs.list }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.swarmnative.dep.fingerprint=${{ steps.fp.outputs.sha }}
+            org.swarmnative.dep.source=${{ steps.fp.outputs.source }}
+          build-args: |
+            RCLONE_IMAGE=${{ env.RCLONE_IMAGE }}
+
+      - name: SBOM (Syft)
+        uses: anchore/sbom-action@v0
+        with:
+          artifact-name: sbom.spdx.json
+          format: spdx-json
+      - name: Sign image (Cosign)
+        if: ${{ github.event_name != 'pull_request' && env.COSIGN_KEY != '' && env.COSIGN_PASSWORD != '' }}
+        uses: sigstore/cosign-installer@v3
+      - name: Cosign Sign
+        if: ${{ github.event_name != 'pull_request' && env.COSIGN_KEY != '' && env.COSIGN_PASSWORD != '' }}
+        env:
+          COSIGN_PASSWORD: ${{ env.COSIGN_PASSWORD }}
+        run: |
+          echo "${{ env.COSIGN_KEY }}" > cosign.key
+          for t in ${{ steps.meta.outputs.tags }}; do
+            cosign sign --key cosign.key "$t" || true
+          done
+
+      - name: Create GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
