@@ -12,7 +12,7 @@ permissions:
 env:
   OWNER: ${{ github.repository_owner }}
   OWNER_TYPE: ${{ github.event.repository.owner.type }} # 'Organization' or 'User'
-  PACKAGE: swarm-s3-mounter
+  PACKAGE: volume-s3
   RETENTION_DAYS: '30'
   FP_RETENTION_DAYS: '14'
   UNTAGGED_DAYS: '7'
@@ -95,7 +95,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DH_NAMESPACE: ${{ secrets.DOCKERHUB_NAMESPACE }}
-      DH_REPO: swarm-s3-mounter
+      DH_REPO: volume-s3
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
