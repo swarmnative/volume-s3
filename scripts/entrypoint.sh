@@ -1,6 +1,23 @@
 #!/bin/sh
 set -eu
 
+# If running as root, dynamically join docker.sock group then drop to app user
+if [ "$(id -u)" = "0" ]; then
+  SOCK=${DOCKER_SOCK_PATH:-/var/run/docker.sock}
+  if [ -S "$SOCK" ]; then
+    GID=$(stat -c %g "$SOCK" 2>/dev/null || echo "")
+    if [ -n "$GID" ]; then
+      if ! getent group "$GID" >/dev/null 2>&1; then
+        addgroup -g "$GID" dockersock >/dev/null 2>&1 || true
+      fi
+      GRP_NAME=$(getent group "$GID" | cut -d: -f1 || echo "dockersock")
+      adduser app "$GRP_NAME" >/dev/null 2>&1 || true
+    fi
+  fi
+  # re-exec as app preserving env
+  exec su-exec app:app /entrypoint.sh "$@"
+fi
+
 # Preflight checks (best-effort with clear warnings)
 if [ ! -e /dev/fuse ]; then
   echo "[WARN] /dev/fuse not found. rclone FUSE mount will fail. Bind /dev/fuse into the container." >&2
