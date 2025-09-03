@@ -1,4 +1,4 @@
-module github.com/swarmnative/swarm-s3-mounter
+module github.com/swarmnative/volume-s3
 
 go 1.22
 
