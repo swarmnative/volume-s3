@@ -135,7 +135,7 @@ jobs:
       - name: Build and Push (multi-arch)
         uses: docker/build-push-action@v6
         with:
-          context: ./volume-s3
+          context: .
           push: ${{ github.event_name != 'pull_request' }}
           platforms: linux/amd64,linux/arm64
           tags: |

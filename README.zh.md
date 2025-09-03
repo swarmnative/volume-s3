@@ -218,4 +218,63 @@ scrape_configs:
 - `tasks.<service>` 会不会连到其他节点的代理？
   - 它解析的是后端 Service 副本 IP，通常用于直连后端而非本项目的 HAProxy。若启用节点本地 LB，请使用 `volume-s3-lb-<hostname>` 端点。
 
+## 示例：连接 S3 兼容集群 + 启用节点本地 HAProxy（就近 + 负载均衡 + 故障转移）
+在 Swarm 中推荐启用“节点本地 LB”：每个节点的 rclone 连接本节点 HAProxy 别名以降低延迟，HAProxy 负责健康检查与故障转移。策略：`leastconn`。
+
+前提：
+- 已有 S3 兼容集群，可通过多个 Swarm 服务访问（例如 `s3node1,s3node2,...`，端口 9000）
+- 每个服务提供 HTTP 就绪检查（例如 `/health`）
+
+```yaml
+version: "3.8"
+
+networks:
+  s3_net:
+    driver: overlay
+    attachable: true
+
+secrets:
+  s3_access_key: { external: true }
+  s3_secret_key: { external: true }
+
+services:
+  volume-s3:
+    image: ghcr.io/swarmnative/volume-s3:latest
+    networks: [s3_net]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - type: bind
+        source: /mnt/s3
+        target: /mnt/s3
+        bind: { propagation: rshared }
+    secrets: [s3_access_key, s3_secret_key]
+    environment:
+      # 反代：多后端 + 节点本地别名（就近 + 故障转移）
+      - VOLS3_PROXY_ENABLE=true
+      - VOLS3_PROXY_ENGINE=haproxy
+      - VOLS3_PROXY_LOCAL_SERVICES=s3node1,s3node2,s3node3,s3node4
+      - VOLS3_PROXY_BACKEND_PORT=9000
+      - VOLS3_PROXY_HEALTH_PATH=/health
+      - VOLS3_PROXY_LOCAL_LB=true
+      - VOLS3_PROXY_NETWORK=s3_net
+      - VOLS3_PROXY_PORT=8081
+      # S3 与 rclone
+      - VOLS3_RCLONE_REMOTE=S3:team-bucket
+      - VOLS3_MOUNTPOINT=/mnt/s3
+      - VOLS3_ACCESS_KEY_FILE=/run/secrets/s3_access_key
+      - VOLS3_SECRET_KEY_FILE=/run/secrets/s3_secret_key
+      # 调优：多小文件/多目录（平衡缓存与内存）
+      - VOLS3_RCLONE_ARGS=--vfs-cache-mode=full --vfs-cache-max-size=4G --vfs-cache-max-age=48h --dir-cache-time=24h --attr-timeout=2s --buffer-size=8M --s3-chunk-size=8M --s3-upload-concurrency=4 --s3-max-upload-parts=10000
+      - VOLS3_UNMOUNT_ON_EXIT=true
+      - VOLS3_AUTOCREATE_PREFIX=true
+    deploy:
+      mode: global
+      placement: { constraints: [node.labels.mount_s3 == true] }
+      restart_policy: { condition: any }
+```
+
+提示：
+- `--vfs-cache-mode=full` 对多小文件/目录遍历更友好；根据磁盘空间调整缓存大小与期限。
+- 若后端要求 path-style，可加 `--s3-force-path-style=true`；若为公有云对象存储，补 `--s3-region=<region>`。
+
 
