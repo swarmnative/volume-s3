@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/swarmnative/swarm-s3-mounter/internal/controller"
+	"github.com/swarmnative/volume-s3/internal/controller"
 )
 
 func main() {
