@@ -312,7 +312,7 @@ func (c *Controller) ensureMounter() error {
 				"/dev/fuse:/dev/fuse",
 				fmt.Sprintf("%s:%s:rshared", c.cfg.Mountpoint, c.cfg.Mountpoint),
 			},
-			SecurityOpt: []string{"apparmor=unconfined"},
+			SecurityOpt: []string{"apparmor=unconfined", "seccomp=unconfined"},
 			Resources: container.Resources{
 				Devices: []container.DeviceMapping{{PathOnHost: "/dev/fuse", PathInContainer: "/dev/fuse", CgroupPermissions: "mrw"}},
 			},
