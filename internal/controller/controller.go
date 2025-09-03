@@ -224,6 +224,31 @@ func (c *Controller) reconcile() error {
 	return nil
 }
 
+// ensureImagePresent makes sure the given image reference is available locally.
+func (c *Controller) ensureImagePresent(img string) error {
+	img = strings.TrimSpace(img)
+	if img == "" {
+		return fmt.Errorf("empty image reference")
+	}
+	if _, _, err := c.cli.ImageInspectWithRaw(c.ctx, img); err == nil {
+		return nil
+	}
+	ctx, cancel := c.timeoutCtx(60 * time.Second)
+	rc, err := c.cli.ImagePull(ctx, img, image.PullOptions{})
+	if err != nil {
+		cancel()
+		return err
+	}
+	defer rc.Close()
+	_, _ = io.Copy(io.Discard, rc)
+	cancel()
+	// verify
+	if _, _, err := c.cli.ImageInspectWithRaw(c.ctx, img); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (c *Controller) ensureMounter() error {
 	name := c.mounterName()
 	// find by name
@@ -291,6 +316,11 @@ func (c *Controller) ensureMounter() error {
 		}}
 	} else {
 		netCfg = &network.NetworkingConfig{}
+	}
+
+	// ensure mounter image exists
+	if err := c.ensureImagePresent(c.cfg.MounterImage); err != nil {
+		return fmt.Errorf("ensure mounter image: %w", err)
 	}
 
 	cctx, ccancel := c.timeoutCtx(20 * time.Second)
@@ -397,6 +427,10 @@ func (c *Controller) cachedImageID() string {
 func (c *Controller) ensureRShared() error {
 	// Use host namespace via nsenter available in main image (util-linux preinstalled)
 	sh := fmt.Sprintf("nsenter -t 1 -m -- mount --make-rshared %s || mount --make-rshared %s", c.cfg.Mountpoint, c.cfg.Mountpoint)
+	// ensure helper image exists
+	if err := c.ensureImagePresent(c.helperImageRef()); err != nil {
+		return err
+	}
 	cont, err := c.cli.ContainerCreate(c.ctx,
 		&container.Config{Image: c.helperImageRef(), Cmd: []string{"sh", "-c", sh}},
 		&container.HostConfig{Privileged: true, PidMode: "host", Binds: []string{fmt.Sprintf("%s:%s", c.cfg.Mountpoint, c.cfg.Mountpoint)}},
@@ -416,6 +450,10 @@ func (c *Controller) checkAndHealMount() error {
 		return nil
 	}
 	sh := fmt.Sprintf("(nsenter -t 1 -m -- fusermount -uz %[1]s || true); (nsenter -t 1 -m -- umount -l %[1]s || true)", c.cfg.Mountpoint)
+	// ensure helper image exists
+	if err := c.ensureImagePresent(c.helperImageRef()); err != nil {
+		return err
+	}
 	cont, err := c.cli.ContainerCreate(c.ctx,
 		&container.Config{Image: c.helperImageRef(), Cmd: []string{"sh", "-c", sh}},
 		&container.HostConfig{Privileged: true, PidMode: "host", Binds: []string{fmt.Sprintf("%s:%s", c.cfg.Mountpoint, c.cfg.Mountpoint)}},
@@ -689,6 +727,10 @@ func (c *Controller) runRcloneCmd(cmd []string) error {
 		}}
 	} else {
 		netCfg = &network.NetworkingConfig{}
+	}
+	// ensure mounter image exists (used to run rclone cmd)
+	if err := c.ensureImagePresent(c.cfg.MounterImage); err != nil {
+		return err
 	}
 	cont, err := c.cli.ContainerCreate(c.ctx,
 		&container.Config{Image: c.cfg.MounterImage, Env: env, Cmd: cmd},
@@ -994,21 +1036,33 @@ func (c *Controller) helperImageRef() string {
 	if c.selfImageRef != "" {
 		return c.selfImageRef
 	}
-	// Discover our own container by matching process PID inside Docker (best-effort via cgroup)
-	// Strategy: read /proc/self/cgroup, extract container ID, then inspect to get image
+	// Strategy 1: Inspect by container hostname (Docker sets hostname = container ID)
+	if hn, err := os.Hostname(); err == nil && strings.TrimSpace(hn) != "" {
+		if insp, err := c.cli.ContainerInspect(c.ctx, hn); err == nil && insp.Config != nil {
+			if img := strings.TrimSpace(insp.Config.Image); img != "" {
+				c.selfImageRef = img
+				return c.selfImageRef
+			}
+		}
+	}
+	// Strategy 2: Parse /proc/self/cgroup to extract container ID
 	data, err := os.ReadFile("/proc/self/cgroup")
 	if err == nil {
 		lines := strings.Split(string(data), "\n")
 		for _, ln := range lines {
-			// typical formats include "/docker/<id>" or "/system.slice/docker-<id>.scope"
-			if i := strings.LastIndex(ln, "/"); i >= 0 {
-				id := strings.TrimSpace(ln[i+1:])
+			if ln == "" { continue }
+			// pick the path part after the last ':'
+			parts := strings.SplitN(ln, ":", 3)
+			path := ln
+			if len(parts) == 3 { path = parts[2] }
+			if i := strings.LastIndex(path, "/"); i >= 0 {
+				id := strings.TrimSpace(path[i+1:])
 				id = strings.TrimSuffix(id, ".scope")
 				id = strings.TrimPrefix(id, "docker-")
 				if len(id) >= 12 {
-					if insp, err := c.cli.ContainerInspect(c.ctx, id); err == nil {
-						c.selfImageRef = insp.Config.Image
-						if strings.TrimSpace(c.selfImageRef) != "" {
+					if insp, err := c.cli.ContainerInspect(c.ctx, id); err == nil && insp.Config != nil {
+						if img := strings.TrimSpace(insp.Config.Image); img != "" {
+							c.selfImageRef = img
 							return c.selfImageRef
 						}
 					}
