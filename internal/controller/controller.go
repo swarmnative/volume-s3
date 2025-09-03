@@ -77,6 +77,8 @@ type Controller struct {
 	mounterCreatedTotal int64
 	// events
 	eventCh chan struct{}
+	// cache
+	selfImageRef string
 }
 
 func New(ctx context.Context, cfg Config) (*Controller, error) {
