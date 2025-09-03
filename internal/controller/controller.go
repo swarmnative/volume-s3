@@ -288,6 +288,11 @@ func (c *Controller) ensureMounter() error {
 		}
 	}
 
+	// Before creating a fresh mounter, ensure no stale mount remains
+	if err := c.unmountIfMounted(); err != nil {
+		slog.Warn("pre-create unmount failed", "error", err)
+	}
+
 	// read secrets
 	_, _ = os.ReadFile(c.cfg.AccessKeyFile)
 	_, _ = os.ReadFile(c.cfg.SecretKeyFile)
@@ -364,6 +369,39 @@ func (c *Controller) ensureMounter() error {
 	}
 	scancel2()
 	c.mounterCreatedTotal++
+	return nil
+}
+
+// isMounted checks whether a path is currently a mountpoint (best-effort by reading /proc/self/mountinfo)
+func isMounted(path string) bool {
+	b, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil { return false }
+	lines := strings.Split(string(b), "\n")
+	for _, ln := range lines {
+		if ln == "" { continue }
+		fields := strings.Fields(ln)
+		if len(fields) >= 5 {
+			if fields[4] == path { return true }
+		}
+	}
+	return false
+}
+
+// unmountIfMounted lazily unmounts the configured mountpoint when it is currently mounted.
+func (c *Controller) unmountIfMounted() error {
+	if !isMounted(c.cfg.Mountpoint) {
+		return nil
+	}
+	sh := fmt.Sprintf("(nsenter -t 1 -m -- fusermount -uz %[1]s || true); (nsenter -t 1 -m -- umount -l %[1]s || true)", c.cfg.Mountpoint)
+	if err := c.ensureImagePresent(c.helperImageRef()); err != nil { return err }
+	cont, err := c.cli.ContainerCreate(c.ctx,
+		&container.Config{Image: c.helperImageRef(), Cmd: []string{"sh", "-c", sh}},
+		&container.HostConfig{Privileged: true, PidMode: "host", Binds: []string{fmt.Sprintf("%s:%s", c.cfg.Mountpoint, c.cfg.Mountpoint)}},
+		&network.NetworkingConfig{}, nil, c.helperName("preunmount"))
+	if err != nil { return err }
+	defer func() { _ = c.cli.ContainerRemove(c.ctx, cont.ID, container.RemoveOptions{Force: true}) }()
+	_ = c.cli.ContainerStart(c.ctx, cont.ID, container.StartOptions{})
+	time.Sleep(1 * time.Second)
 	return nil
 }
 
