@@ -31,7 +31,7 @@ func main() {
 		AccessKeyFile:       getenv("VOLS3_ACCESS_KEY_FILE", "/run/secrets/s3_access_key"),
 		SecretKeyFile:       getenv("VOLS3_SECRET_KEY_FILE", "/run/secrets/s3_secret_key"),
 		MounterImage:        getenv("VOLS3_RCLONE_IMAGE", getenv("VOLS3_DEFAULT_RCLONE_IMAGE", "rclone/rclone:latest")),
-		HelperImage:         getenv("VOLS3_NSENTER_HELPER_IMAGE", "alpine:3.20"),
+		HelperImage:         getenv("VOLS3_NSENTER_HELPER_IMAGE", ""),
 		ReadyFile:           ".ready",
 		PollInterval:        15 * time.Second,
 		MounterUpdateMode:   getenv("VOLS3_RCLONE_UPDATE_MODE", defaultUpdateMode()),
