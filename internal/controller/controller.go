@@ -784,7 +784,8 @@ func (c *Controller) collectServiceClaimSpecs() ([]claimSpec, error) {
         if cs.enabled && cs.prefix == "" && c.cfg.AutoClaimFromMounts {
             mounts := svc.Spec.TaskTemplate.ContainerSpec.Mounts
             for _, mnt := range mounts {
-                if mnt.Type == swarm.MountTypeBind {
+                // Avoid SDK const dependency differences; compare by string value
+                if strings.EqualFold(string(mnt.Type), "bind") {
                     src := strings.TrimSpace(mnt.Source)
                     mp := strings.TrimRight(c.cfg.Mountpoint, "/") + "/"
                     if strings.HasPrefix(src, mp) {
