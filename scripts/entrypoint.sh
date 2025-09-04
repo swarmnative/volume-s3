@@ -44,6 +44,49 @@ if [ -d "/app/etc/ca" ]; then
   fi
 fi
 
+# Pre-start self-heal for leftover mounts and ensure shared propagation
+MOUNTPOINT=${VOLS3_MOUNTPOINT:-"/mnt/s3"}
+UNMOUNT_ON_EXIT=${VOLS3_UNMOUNT_ON_EXIT:-"true"}
+
+is_mounted() {
+  grep -qsE "[[:space:]]$(printf %q "$MOUNTPOINT")[[:space:]]" /proc/self/mountinfo
+}
+
+test_rw() {
+  touch "$MOUNTPOINT/.vols3_probe" 2>/dev/null && rm -f "$MOUNTPOINT/.vols3_probe" 2>/dev/null
+}
+
+lazy_unmount() {
+  nsenter -t 1 -m -- fusermount -uz "$MOUNTPOINT" 2>/dev/null || true
+  nsenter -t 1 -m -- umount -l "$MOUNTPOINT" 2>/dev/null || true
+  fusermount -uz "$MOUNTPOINT" 2>/dev/null || true
+  umount -l "$MOUNTPOINT" 2>/dev/null || true
+}
+
+make_shared() {
+  nsenter -t 1 -m -- mount --make-rshared "$MOUNTPOINT" 2>/dev/null || mount --make-rshared "$MOUNTPOINT" 2>/dev/null || true
+}
+
+pre_start_self_heal() {
+  mkdir -p "$MOUNTPOINT" 2>/dev/null || true
+  if is_mounted; then
+    if ! test_rw; then
+      echo "[INFO] Detected stale mount at $MOUNTPOINT, attempting lazy unmount..." >&2
+      lazy_unmount
+    fi
+  fi
+  make_shared
+}
+
+cleanup() {
+  if [ "$UNMOUNT_ON_EXIT" = "true" ]; then
+    echo "[INFO] Unmount on exit enabled, attempting lazy unmount for $MOUNTPOINT" >&2
+    lazy_unmount
+  fi
+}
+
+pre_start_self_heal
+
 ENABLE_PROXY=${VOLS3_PROXY_ENABLE:-"false"}
 PROXY_ENGINE=${VOLS3_PROXY_ENGINE:-"haproxy"} # haproxy only
 
@@ -148,7 +191,13 @@ SUPV
   # Explicitly exec supervisord (do not rely on CMD and do not exec "$@")
   exec /usr/bin/supervisord -c "$SUPERVISOR_CONF"
 else
-  # 无代理：直接运行 volume-ops，绕过 supervisor
-  exec /usr/local/bin/volume-ops
+  # 无代理：运行 volume-ops 并安装退出清理
+  trap 'cleanup' EXIT INT TERM
+  /usr/local/bin/volume-ops &
+  pid=$!
+  wait "$pid"
+  status=$?
+  cleanup || true
+  exit "$status"
 fi
 
