@@ -40,6 +40,7 @@ func main() {
 		AutoCreateBucket:    getenv("VOLS3_AUTOCREATE_BUCKET", "false") == "true",
 		AutoCreatePrefix:    getenv("VOLS3_AUTOCREATE_PREFIX", "false") == "true",
 		ReadOnly:            getenv("VOLS3_READ_ONLY", "false") == "true",
+		AllowOther:          getenv("VOLS3_ALLOW_OTHER", "false") == "true",
 		EnableProxy:         getenv("VOLS3_PROXY_ENABLE", "false") == "true",
 		LocalLBEnabled:      getenv("VOLS3_PROXY_LOCAL_LB", "false") == "true",
 		ProxyPort:           getenv("VOLS3_PROXY_PORT", "8081"),

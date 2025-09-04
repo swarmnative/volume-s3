@@ -44,6 +44,7 @@ type Config struct {
 	AutoCreateBucket    bool
 	AutoCreatePrefix    bool
 	ReadOnly            bool
+	AllowOther          bool
 	EnableProxy         bool
 	LocalLBEnabled      bool
 	ProxyPort           string
@@ -299,7 +300,15 @@ func (c *Controller) ensureMounter() error {
 
 	env := c.buildRcloneEnv()
 
-	cmd := []string{"mount", c.cfg.RcloneRemote, c.cfg.Mountpoint, "--allow-other", "--vfs-cache-mode=writes", "--dir-cache-time=12h"}
+	cmd := []string{"mount", c.cfg.RcloneRemote, c.cfg.Mountpoint}
+	// access model
+	if c.cfg.AllowOther {
+		cmd = append(cmd, "--allow-other")
+	} else {
+		cmd = append(cmd, "--allow-root")
+	}
+	// defaults
+	cmd = append(cmd, "--vfs-cache-mode=writes", "--dir-cache-time=12h")
 	// presets first
 	cmd = append(cmd, c.buildPresetArgs()...)
 	if c.cfg.ReadOnly {
@@ -1037,6 +1046,7 @@ func ValidateConfig(cfg Config) ValidationResult {
 		"auto_create_bucket":    fmt.Sprintf("%t", cfg.AutoCreateBucket),
 		"auto_create_prefix":    fmt.Sprintf("%t", cfg.AutoCreatePrefix),
 		"read_only":             fmt.Sprintf("%t", cfg.ReadOnly),
+		"allow_other":           fmt.Sprintf("%t", cfg.AllowOther),
 		"enable_proxy":          fmt.Sprintf("%t", cfg.EnableProxy),
 		"local_lb_enabled":      fmt.Sprintf("%t", cfg.LocalLBEnabled),
 		"proxy_port":            cfg.ProxyPort,

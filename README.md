@@ -38,7 +38,7 @@ docker secret create s3_access_key -
 docker secret create s3_secret_key -
 # paste SecretKey then Ctrl-D
 ```
-Deploy (single backend service, mounter reaches `tasks.minio:9000` via built-in HAProxy):
+Deploy (single backend service, assume an existing S3-compatible service `s3-backend`; mounter reaches `tasks.s3-backend:9000` via built-in HAProxy):
 ```yaml
 version: "3.8"
 
@@ -49,23 +49,6 @@ secrets:
   s3_secret_key: { external: true }
 
 services:
-  minio:
-    image: minio/minio:latest
-    command: server --console-address :9001 /data
-    environment:
-      - MINIO_ROOT_USER_FILE=/run/secrets/s3_access_key
-      - MINIO_ROOT_PASSWORD_FILE=/run/secrets/s3_secret_key
-    secrets: [s3_access_key, s3_secret_key]
-    volumes: ["/srv/minio/data:/data"]
-    networks: [s3_net]
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/ready || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
-    deploy:
-      placement: { constraints: [node.labels.minio == true] }
-
   volume-s3:
     image: ghcr.io/swarmnative/volume-s3:latest
     networks: [s3_net]
@@ -79,10 +62,10 @@ services:
     environment:
       - VOLS3_PROXY_ENABLE=true
       - VOLS3_PROXY_ENGINE=haproxy
-      - VOLS3_PROXY_LOCAL_SERVICES=minio
+      - VOLS3_PROXY_LOCAL_SERVICES=s3-backend
       - VOLS3_PROXY_BACKEND_PORT=9000
-      - VOLS3_PROXY_HEALTH_PATH=/minio/health/ready
-      - VOLS3_PROVIDER=Minio
+      - VOLS3_PROXY_HEALTH_PATH=/health
+      - VOLS3_PROVIDER=
       - VOLS3_RCLONE_REMOTE=S3:mybucket
       - VOLS3_MOUNTPOINT=/mnt/s3
       - VOLS3_ACCESS_KEY_FILE=/run/secrets/s3_access_key
@@ -112,6 +95,82 @@ services:
 
 ---
 
+## Access modes (root / non-root)
+Pick one based on your security and visibility needs:
+
+- Mode A: Non-root apps can access (requires host `user_allow_other`)
+  - Host (one-time):
+    - `echo user_allow_other | sudo tee /etc/fuse.conf`
+    - `nsenter -t 1 -m -- mount --make-rshared /mnt/s3`
+  - volume-s3 (example args — adjust uid/gid/umask to your app user):
+```yaml
+environment:
+  VOLS3_RCLONE_ARGS: >-
+    --allow-other
+    --uid=1000
+    --gid=1000
+    --umask=0022
+    --vfs-cache-mode=writes
+    --vfs-cache-max-size=256M
+    --vfs-cache-max-age=12h
+    --vfs-cache-poll-interval=1m
+    --vfs-read-ahead=0
+    --buffer-size=1M
+    --dir-cache-time=1h
+    --attr-timeout=1s
+    --transfers=2
+    --checkers=2
+    --multi-thread-streams=0
+    --s3-chunk-size=5M
+    --s3-upload-concurrency=1
+    --s3-max-upload-parts=10000
+    --s3-force-path-style=true
+    --use-server-modtime
+    --no-update-modtime
+```
+  - App container:
+```yaml
+services:
+  app:
+    image: your/app:latest
+    user: "1000:1000"
+    volumes:
+      - type: bind
+        source: /mnt/s3
+        target: /data
+        bind: { propagation: rshared }
+```
+
+- Mode B: No host change (root-only access, simplest)
+  - volume-s3:
+```yaml
+environment:
+  VOLS3_RCLONE_ARGS: >-
+    --allow-root
+    --uid=0
+    --gid=0
+    --umask=0022
+    --vfs-cache-mode=writes
+```
+  - App container (hardened root):
+```yaml
+services:
+  app:
+    image: your/app:latest
+    user: "0:0"
+    volumes:
+      - type: bind
+        source: /mnt/s3
+        target: /data
+        bind: { propagation: rshared }
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+```
+
+Note: In both modes the mountpoint `/mnt/s3` must be `shared` (controller attempts to set it; if needed run the nsenter command above once per node).
+
+---
+
 ## Configuration (env vars)
 
 ### Basic
@@ -124,6 +183,11 @@ services:
 | `VOLS3_ACCESS_KEY_FILE` | path | yes | `/run/secrets/s3_access_key` | AccessKey secret file |
 | `VOLS3_SECRET_KEY_FILE` | path | yes | `/run/secrets/s3_secret_key` | SecretKey secret file |
 | `VOLS3_RCLONE_ARGS` | string | no | empty | Extra rclone args |
+
+### Access control
+| Variable | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `VOLS3_ALLOW_OTHER` | bool | no | `false` | If `true`, controller defaults to `--allow-other` (host must enable `/etc/fuse.conf` `user_allow_other`); if `false`, defaults to `--allow-root`. Your `VOLS3_RCLONE_ARGS` can still override. |
 
 ### HAProxy / Node-local LB
 | Variable | Type | Required | Default | Description |

@@ -32,7 +32,7 @@ docker secret create s3_access_key -
 docker secret create s3_secret_key -
 # 粘贴 SecretKey 回车，Ctrl-D 结束
 ```
-部署（单后端 Service 示例，mounter 通过内置 HAProxy 均衡到 tasks.minio:9000）：
+部署（单后端 Service 示例，假设已存在可达的 S3 兼容服务 `s3-backend`，mounter 通过内置 HAProxy 均衡到 `tasks.s3-backend:9000`）：
 ```yaml
 version: "3.8"
 
@@ -48,26 +48,6 @@ secrets:
     external: true
 
 services:
-  minio:
-    image: minio/minio:latest
-    command: server --console-address :9001 /data
-    environment:
-      - MINIO_ROOT_USER_FILE=/run/secrets/s3_access_key
-      - MINIO_ROOT_PASSWORD_FILE=/run/secrets/s3_secret_key
-    secrets: [s3_access_key, s3_secret_key]
-    volumes:
-      - /srv/minio/data:/data
-    networks: [s3_net]
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/ready || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
-    deploy:
-      placement:
-        constraints:
-          - node.labels.minio == true
-
   volume-s3:
     image: ghcr.io/swarmnative/volume-s3:latest
     networks: [s3_net]
@@ -81,10 +61,10 @@ services:
     environment:
       - VOLS3_PROXY_ENABLE=true
       - VOLS3_PROXY_ENGINE=haproxy
-      - VOLS3_PROXY_LOCAL_SERVICES=minio
+      - VOLS3_PROXY_LOCAL_SERVICES=s3-backend
       - VOLS3_PROXY_BACKEND_PORT=9000
-      - VOLS3_PROXY_HEALTH_PATH=/minio/health/ready
-      - VOLS3_PROVIDER=Minio
+      - VOLS3_PROXY_HEALTH_PATH=/health
+      - VOLS3_PROVIDER=
       - VOLS3_RCLONE_REMOTE=S3:mybucket
       - VOLS3_MOUNTPOINT=/mnt/s3
       - VOLS3_ACCESS_KEY_FILE=/run/secrets/s3_access_key
@@ -117,6 +97,50 @@ services:
 
 ---
 
+## 访问模式（root / 非 root）
+根据安全与可见性诉求选择其一：
+
+- 模式 A：非 root 业务容器可访问（需要宿主开启 user_allow_other）
+  - 宿主一次性：
+    - `echo user_allow_other | sudo tee /etc/fuse.conf`
+    - `nsenter -t 1 -m -- mount --make-rshared /mnt/s3`
+  - volume-s3：
+    - `VOLS3_RCLONE_ARGS` 加 `--allow-other --uid=1000 --gid=1000 --umask=0022`（按业务 UID/GID 调整）
+  - 业务容器：
+```yaml
+services:
+  app:
+    image: your/app:latest
+    user: "1000:1000"
+    volumes:
+      - type: bind
+        source: /mnt/s3
+        target: /data
+        bind: { propagation: rshared }
+```
+
+- 模式 B：不改宿主（仅 root 可访问，最省事）
+  - volume-s3：
+    - `VOLS3_RCLONE_ARGS` 用 `--allow-root --uid=0 --gid=0 --umask=0022`
+  - 业务容器：
+```yaml
+services:
+  app:
+    image: your/app:latest
+    user: "0:0"
+    volumes:
+      - type: bind
+        source: /mnt/s3
+        target: /data
+        bind: { propagation: rshared }
+    security_opt: [no-new-privileges:true]
+    cap_drop: ["ALL"]
+```
+
+提示：两种模式均需确保 `/mnt/s3` 为 shared（已内置自愈尝试，必要时手工执行上面的 nsenter 命令）。
+
+---
+
 ## 配置（环境变量）
 
 ### 基本
@@ -129,6 +153,11 @@ services:
 | `VOLS3_ACCESS_KEY_FILE` | AccessKey 的 secret 路径 | `/run/secrets/s3_access_key` |
 | `VOLS3_SECRET_KEY_FILE` | SecretKey 的 secret 路径 | `/run/secrets/s3_secret_key` |
 | `VOLS3_RCLONE_ARGS` | 追加 rclone 参数（唯一调优入口） | 空 |
+
+### 访问控制
+| 变量 | 说明 | 默认 |
+| --- | --- | --- |
+| `VOLS3_ALLOW_OTHER` | 为 true 时默认加 `--allow-other`（需宿主 `/etc/fuse.conf` 启用 `user_allow_other`）；为 false 时用 `--allow-root` | `false` |
 
 ### 负载均衡（HAProxy）
 | 变量 | 说明 | 默认 |
