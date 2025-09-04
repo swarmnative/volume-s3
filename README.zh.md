@@ -261,6 +261,7 @@ networks:
   s3_net:
     driver: overlay
     attachable: true
+    internal: true
 
 secrets:
   s3_access_key: { external: true }
@@ -305,5 +306,13 @@ services:
 提示：
 - `--vfs-cache-mode=full` 对多小文件/目录遍历更友好；根据磁盘空间调整缓存大小与期限。
 - 若后端要求 path-style，可加 `--s3-force-path-style=true`；若为公有云对象存储，补 `--s3-region=<region>`。
+- 默认已追加 `--allow-non-empty`，避免与 rshared 绑定冲突（目录已挂载）。
+- 两种模式均需确保 `/mnt/s3` 为 shared（已内置自愈，必要时手工执行上面的 nsenter 命令）。
+- FUSE3 上游已移除 `allow_root` 支持，`--allow-root` 会被忽略；如需跨用户访问，请使用 `--allow-other` 且在 mounter 镜像内启用 `/etc/fuse.conf` 的 `user_allow_other`。
+
+### 节点就近（Overlay IP 模式，推荐）
+- 当 `VOLS3_PROXY_ENABLE=true` 且设置了 `VOLS3_PROXY_NETWORK`（attachable 的 overlay）时，controller 每次调谐会查询“自身在该 overlay 的 IPv4”，并将 mounter 的端点设置为 `http://<controller-overlay-IP>:<VOLS3_PROXY_PORT>`。
+- mounter 同样加入该 overlay，实现“本节点 mounter 直连本节点 controller 的 HAProxy”，无需节点别名与 127.0.0.1 共享命名空间。
+- 若 controller 重启或 IP 变化，controller 会检测端点漂移并自动重建 mounter，端点随之更新。
 
 

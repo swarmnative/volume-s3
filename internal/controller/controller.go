@@ -261,7 +261,7 @@ func (c *Controller) ensureMounter() error {
 	if err != nil {
 		return err
 	}
-	// If exists and image changed (after pull), recreate
+	// If exists and image changed (after pull) or endpoint drifted, recreate
 	desiredImageID := c.cachedImageID()
 	if len(conts) > 0 {
 		id := conts[0].ID
@@ -274,7 +274,24 @@ func (c *Controller) ensureMounter() error {
 				_ = c.cli.ContainerRemove(rctx, id, container.RemoveOptions{Force: true})
 				rcancel()
 			} else if inspect.State != nil && inspect.State.Running {
-				return nil
+				// Endpoint drift detection
+				desired := strings.TrimSpace(c.resolveEndpointForMounter())
+				current := ""
+				if inspect.Config != nil {
+					for _, e := range inspect.Config.Env {
+						if strings.HasPrefix(e, "RCLONE_CONFIG_S3_ENDPOINT=") {
+							current = strings.TrimPrefix(e, "RCLONE_CONFIG_S3_ENDPOINT=")
+							break
+						}
+					}
+				}
+				if desired != "" && current != "" && !strings.EqualFold(desired, current) {
+					rctx, rcancel := c.timeoutCtx(10 * time.Second)
+					_ = c.cli.ContainerRemove(rctx, id, container.RemoveOptions{Force: true})
+					rcancel()
+				} else {
+					return nil
+				}
 			} else {
 				sctx, scancel := c.timeoutCtx(10 * time.Second)
 				if err := c.cli.ContainerStart(sctx, id, container.StartOptions{}); err == nil {
@@ -308,7 +325,7 @@ func (c *Controller) ensureMounter() error {
 		cmd = append(cmd, "--allow-root")
 	}
 	// defaults
-	cmd = append(cmd, "--vfs-cache-mode=writes", "--dir-cache-time=12h")
+	cmd = append(cmd, "--vfs-cache-mode=writes", "--dir-cache-time=12h", "--allow-non-empty")
 	// presets first
 	cmd = append(cmd, c.buildPresetArgs()...)
 	if c.cfg.ReadOnly {
@@ -318,15 +335,11 @@ func (c *Controller) ensureMounter() error {
 		cmd = append(cmd, parseArgs(c.cfg.RcloneExtraArgs)...)
 	}
 
-	// Attach to overlay network when provided; add node-local alias if local LB is enabled
+	// Networking: attach to overlay network when provided (for controller overlay IP access)
 	var netCfg *network.NetworkingConfig
 	if strings.TrimSpace(c.cfg.ProxyNetwork) != "" {
-		es := &network.EndpointSettings{}
-		if c.cfg.EnableProxy && c.cfg.LocalLBEnabled {
-			es.Aliases = []string{c.localAlias()}
-		}
 		netCfg = &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{
-			c.cfg.ProxyNetwork: es,
+			c.cfg.ProxyNetwork: {},
 		}}
 	} else {
 		netCfg = &network.NetworkingConfig{}
@@ -956,12 +969,60 @@ func (c *Controller) selfNetworkMode() container.NetworkMode {
 }
 
 func (c *Controller) resolveEndpointForMounter() string {
-	// If local LB is enabled and proxy network is set, advertise node-local
-	// alias on that overlay network so mounter can address the local HAProxy.
+	// If proxy and overlay network set, directly use controller overlay IP for node-local access
+	if c.cfg.EnableProxy && strings.TrimSpace(c.cfg.ProxyNetwork) != "" {
+		if ip := c.selfIPOnOverlay(c.cfg.ProxyNetwork); strings.TrimSpace(ip) != "" {
+			return fmt.Sprintf("http://%s:%s", ip, strings.TrimSpace(c.cfg.ProxyPort))
+		}
+	}
+	// Fallbacks: alias (legacy) then configured endpoint
 	if c.cfg.EnableProxy && c.cfg.LocalLBEnabled && strings.TrimSpace(c.cfg.ProxyNetwork) != "" {
 		return fmt.Sprintf("http://%s:%s", c.localAlias(), strings.TrimSpace(c.cfg.ProxyPort))
 	}
 	return c.cfg.S3Endpoint
+}
+
+// selfIPOnOverlay returns the IPv4 of this controller on the given overlay network.
+func (c *Controller) selfIPOnOverlay(netName string) string {
+	// Try hostname -> inspect
+	if hn, err := os.Hostname(); err == nil && strings.TrimSpace(hn) != "" {
+		if insp, err := c.cli.ContainerInspect(c.ctx, hn); err == nil {
+			if insp.NetworkSettings != nil && insp.NetworkSettings.Networks != nil {
+				if ep, ok := insp.NetworkSettings.Networks[netName]; ok && ep != nil {
+					if ip := strings.TrimSpace(ep.IPAddress); ip != "" {
+						return ip
+					}
+				}
+			}
+		}
+	}
+	// Fallback: parse cgroup to get container ID, then inspect
+	if data, err := os.ReadFile("/proc/self/cgroup"); err == nil {
+		lines := strings.Split(string(data), "\n")
+		for _, ln := range lines {
+			if ln == "" { continue }
+			parts := strings.SplitN(ln, ":", 3)
+			path := ln
+			if len(parts) == 3 { path = parts[2] }
+			if i := strings.LastIndex(path, "/"); i >= 0 {
+				id := strings.TrimSpace(path[i+1:])
+				id = strings.TrimSuffix(id, ".scope")
+				id = strings.TrimPrefix(id, "docker-")
+				if len(id) >= 12 {
+					if insp, err := c.cli.ContainerInspect(c.ctx, id); err == nil {
+						if insp.NetworkSettings != nil && insp.NetworkSettings.Networks != nil {
+							if ep, ok := insp.NetworkSettings.Networks[netName]; ok && ep != nil {
+								if ip := strings.TrimSpace(ep.IPAddress); ip != "" {
+									return ip
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func (c *Controller) localAlias() string {
