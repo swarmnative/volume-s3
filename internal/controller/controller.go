@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/client"
 )
 
@@ -53,6 +54,10 @@ type Config struct {
 	LabelStrict         bool
 	StrictReady         bool
 	Preset              string
+	// Claim discovery enhancements
+	ReadServiceLabels      bool   // also parse Swarm Service labels
+	AutoClaimFromMounts    bool   // infer prefix from ServiceSpec.Mounts when enabled and no explicit labels
+	ClaimAllowlistRegex    string // optional whitelist for inferred prefixes
 	// Optional image retention controls (no-op if unused)
 	ImageCleanupEnabled bool
 	ImageRetentionDays  int
@@ -575,13 +580,14 @@ func (c *Controller) logStatus() {
 // other prefixes are ignored with warning.
 func (c *Controller) parseLabels(labels map[string]string) map[string]string {
 	allowed := map[string]struct{}{
-		"s3.enabled": {},
-		"s3.bucket":  {},
-		"s3.prefix":  {},
-		"s3.class":   {},
-		"s3.reclaim": {},
-		"s3.access":  {},
-		"s3.args":    {},
+		// only accept new preferred keys
+		"volume-s3.enabled": {},
+		"volume-s3.bucket":  {},
+		"volume-s3.prefix":  {},
+		"volume-s3.class":   {},
+		"volume-s3.reclaim": {},
+		"volume-s3.access":  {},
+		"volume-s3.args":    {},
 	}
 	values := map[string]struct {
 		v       string
@@ -604,6 +610,24 @@ func (c *Controller) parseLabels(labels map[string]string) map[string]string {
 			}
 			continue
 		}
+		// map new keys to canonical legacy names internally
+		canonical := base
+		switch base {
+		case "volume-s3.enabled":
+			canonical = "s3.enabled"
+		case "volume-s3.bucket":
+			canonical = "s3.bucket"
+		case "volume-s3.prefix":
+			canonical = "s3.prefix"
+		case "volume-s3.class":
+			canonical = "s3.class"
+		case "volume-s3.reclaim":
+			canonical = "s3.reclaim"
+		case "volume-s3.access":
+			canonical = "s3.access"
+		case "volume-s3.args":
+			canonical = "s3.args"
+		}
 		if specified != "" {
 			if prefix != "" && prefix != specified {
 				slog.Warn("ignore label from other prefix", "key", k)
@@ -611,18 +635,18 @@ func (c *Controller) parseLabels(labels map[string]string) map[string]string {
 			}
 		}
 		fromPref := prefix != ""
-		if old, ok := values[base]; ok {
+		if old, ok := values[canonical]; ok {
 			if old.pref && fromPref {
 				if c.cfg.LabelStrict {
-					slog.Error("conflicting prefixed labels", "key", base)
+					slog.Error("conflicting prefixed labels", "key", canonical)
 				} else {
-					slog.Warn("conflicting prefixed labels", "key", base)
+					slog.Warn("conflicting prefixed labels", "key", canonical)
 				}
 				continue
 			}
 			if !old.pref && fromPref {
-				slog.Warn("prefixed label overrides unprefixed", "key", base, "prefix", prefix)
-				values[base] = struct {
+				slog.Warn("prefixed label overrides unprefixed", "key", canonical, "prefix", prefix)
+				values[canonical] = struct {
 					v       string
 					pref    bool
 					pfxName string
@@ -631,7 +655,7 @@ func (c *Controller) parseLabels(labels map[string]string) map[string]string {
 			}
 			continue
 		}
-		values[base] = struct {
+		values[canonical] = struct {
 			v       string
 			pref    bool
 			pfxName string
@@ -664,6 +688,15 @@ func (c *Controller) provisionClaims() error {
 		return err
 	}
 	specs := c.collectClaimSpecs(conts)
+
+	// Prefer service-defined claims as well
+	if c.cfg.ReadServiceLabels {
+		if svSpecs, err := c.collectServiceClaimSpecs(); err != nil {
+			slog.Warn("collect service claims", "error", err)
+		} else if len(svSpecs) > 0 {
+			specs = append(specs, svSpecs...)
+		}
+	}
 	for _, s := range specs {
 		if !s.enabled || s.prefix == "" {
 			continue
@@ -715,6 +748,64 @@ func (c *Controller) collectClaimSpecs(conts []types.Container) []claimSpec {
 		}
 	}
 	return out
+}
+
+// collectServiceClaimSpecs builds claim specs from Swarm Service labels (preferred),
+// and optionally infers prefixes from ServiceSpec.Mounts when enabled and no explicit prefix.
+func (c *Controller) collectServiceClaimSpecs() ([]claimSpec, error) {
+    var out []claimSpec
+    svcs, err := c.cli.ServiceList(c.ctx, types.ServiceListOptions{})
+    if err != nil {
+        return nil, err
+    }
+    // compile optional allowlist regex
+    var allow *regexp.Regexp
+    if strings.TrimSpace(c.cfg.ClaimAllowlistRegex) != "" {
+        if re, err := regexp.Compile(c.cfg.ClaimAllowlistRegex); err == nil {
+            allow = re
+        } else {
+            slog.Warn("invalid allowlist regex", "regex", c.cfg.ClaimAllowlistRegex, "error", err)
+        }
+    }
+    for _, svc := range svcs {
+        m := c.parseLabels(svc.Spec.Labels)
+        var cs claimSpec
+        if v, ok := m["s3.enabled"]; ok {
+            cs.enabled = strings.EqualFold(v, "true")
+        }
+        if v, ok := m["s3.bucket"]; ok { cs.bucket = v }
+        if v, ok := m["s3.prefix"]; ok { cs.prefix = strings.Trim(v, "/") }
+        if v, ok := m["s3.class"]; ok { cs.class = v }
+        if v, ok := m["s3.reclaim"]; ok { cs.reclaim = v }
+        if v, ok := m["s3.access"]; ok { cs.access = v }
+        if v, ok := m["s3.args"]; ok { cs.args = v }
+
+        // If enabled and no explicit prefix, infer from mounts under our mountpoint
+        if cs.enabled && cs.prefix == "" && c.cfg.AutoClaimFromMounts {
+            mounts := svc.Spec.TaskTemplate.ContainerSpec.Mounts
+            for _, mnt := range mounts {
+                if mnt.Type == swarm.MountTypeBind {
+                    src := strings.TrimSpace(mnt.Source)
+                    mp := strings.TrimRight(c.cfg.Mountpoint, "/") + "/"
+                    if strings.HasPrefix(src, mp) {
+                        pref := strings.Trim(strings.TrimPrefix(src, mp), "/")
+                        if pref != "" {
+                            if allow != nil && !allow.MatchString(pref) {
+                                continue
+                            }
+                            cs.prefix = pref
+                            break
+                        }
+                    }
+                }
+            }
+        }
+
+        if cs.enabled && cs.prefix != "" {
+            out = append(out, cs)
+        }
+    }
+    return out, nil
 }
 
 func (c *Controller) buildRcloneEnv() []string {
