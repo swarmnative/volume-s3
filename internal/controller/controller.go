@@ -748,7 +748,12 @@ func (c *Controller) collectClaimSpecs(conts []types.Container) []claimSpec {
 // and optionally infers prefixes from ServiceSpec.Mounts when enabled and no explicit prefix.
 func (c *Controller) collectServiceClaimSpecs() ([]claimSpec, error) {
     var out []claimSpec
-    svcs, err := c.cli.ServiceList(c.ctx, types.ServiceListOptions{})
+    // Prefer manager client if configured
+    cliRef := c.cli
+    if c.managerCli != nil {
+        cliRef = c.managerCli
+    }
+    svcs, err := cliRef.ServiceList(c.ctx, types.ServiceListOptions{})
     if err != nil {
         return nil, err
     }
