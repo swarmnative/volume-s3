@@ -609,24 +609,8 @@ func (c *Controller) parseLabels(labels map[string]string) map[string]string {
 			}
 			continue
 		}
-		// map new keys to canonical legacy names internally
+		// use volume-s3.* keys as canonical names
 		canonical := base
-		switch base {
-		case "volume-s3.enabled":
-			canonical = "s3.enabled"
-		case "volume-s3.bucket":
-			canonical = "s3.bucket"
-		case "volume-s3.prefix":
-			canonical = "s3.prefix"
-		case "volume-s3.class":
-			canonical = "s3.class"
-		case "volume-s3.reclaim":
-			canonical = "s3.reclaim"
-		case "volume-s3.access":
-			canonical = "s3.access"
-		case "volume-s3.args":
-			canonical = "s3.args"
-		}
 		if specified != "" {
 			if prefix != "" && prefix != specified {
 				slog.Warn("ignore label from other prefix", "key", k)

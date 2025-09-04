@@ -7,12 +7,12 @@ import (
 func TestParseLabels_NoPrefix(t *testing.T) {
 	c := &Controller{cfg: Config{}}
 	in := map[string]string{
-		"s3.enabled": "true",
-		"s3.bucket":  "b",
+		"volume-s3.enabled": "true",
+		"volume-s3.bucket":  "b",
 		"foo":        "bar",
 	}
 	m := c.parseLabels(in)
-	if m["s3.enabled"] != "true" || m["s3.bucket"] != "b" {
+	if m["volume-s3.enabled"] != "true" || m["volume-s3.bucket"] != "b" {
 		t.Fatalf("unexpected parse: %#v", m)
 	}
 	if _, ok := m["foo"]; ok {
@@ -23,11 +23,11 @@ func TestParseLabels_NoPrefix(t *testing.T) {
 func TestParseLabels_WithPrefix(t *testing.T) {
 	c := &Controller{cfg: Config{LabelPrefix: "org"}}
 	in := map[string]string{
-		"org/s3.enabled": "true",
-		"s3.enabled":     "false",
+		"org/volume-s3.enabled": "true",
+		"volume-s3.enabled":     "false",
 	}
 	m := c.parseLabels(in)
-	if m["s3.enabled"] != "true" {
+	if m["volume-s3.enabled"] != "true" {
 		t.Fatalf("prefixed should override: %#v", m)
 	}
 }
