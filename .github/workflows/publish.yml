@@ -54,6 +54,7 @@ jobs:
   build-and-push:
     needs: go-ci
     runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.mode || '') != 'images-only' }}
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -179,6 +180,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -263,15 +265,17 @@ jobs:
         run: |
           set -euo pipefail
           DIGEST=${{ steps.build_rclone.outputs.digest }}
+          SRC=ghcr.io/${{ github.repository_owner }}/volume-s3-rclone@${DIGEST}
           docker buildx imagetools create \
             --tag docker.io/${{ env.DOCKERHUB_USERNAME }}/volume-s3-rclone:latest \
-            ${DIGEST}
+            "$SRC"
 
   build-push-volume-s3:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -301,8 +305,8 @@ jobs:
         id: digest_vs3
         run: |
           set -euo pipefail
-          cd volume-s3
-          files=( Dockerfile scripts/entrypoint.sh go.mod go.sum $(git ls-files internal || true) )
+          if [ -d ./volume-s3 ]; then base=./volume-s3; else base=.; fi
+          files=( "$base/Dockerfile" "$base/scripts/entrypoint.sh" "$base/go.mod" "$base/go.sum" $(cd "$base" && git ls-files internal || true) )
           sha=$(sha256sum "${files[@]}" 2>/dev/null | awk '{print $1}' | sha256sum | awk '{print $1}')
           echo "source_digest=$sha" >> $GITHUB_OUTPUT
 
@@ -330,7 +334,7 @@ jobs:
         uses: docker/build-push-action@v5
         id: build_vs3
         with:
-          context: ./volume-s3
+          context: .
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/volume-s3:latest
@@ -345,7 +349,8 @@ jobs:
         run: |
           set -euo pipefail
           DIGEST=${{ steps.build_vs3.outputs.digest }}
+          SRC=ghcr.io/${{ github.repository_owner }}/volume-s3@${DIGEST}
           docker buildx imagetools create \
             --tag docker.io/${{ env.DOCKERHUB_USERNAME }}/volume-s3:latest \
-            ${DIGEST}
+            "$SRC"
 
