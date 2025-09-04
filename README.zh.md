@@ -185,6 +185,22 @@ services:
 | `VOLS3_RCLONE_UPDATE_MODE` | `never`/`periodic`/`on_change` | `never` |
 | `VOLS3_RCLONE_PULL_INTERVAL` | `periodic` 模式拉取间隔 | `24h` |
 
+#### 自建镜像：volume-s3-rclone（推荐用于 allow_other 场景）
+- 项目内置 `volume-s3/images/volume-s3-rclone/Dockerfile`，基于官方 `rclone/rclone:latest`，额外写入 `/etc/fuse.conf` 的 `user_allow_other`。
+- 使用方式：
+  - 构建并推送：
+    ```bash
+    docker build -t <your-registry>/volume-s3-rclone:latest volume-s3/images/volume-s3-rclone
+    docker push <your-registry>/volume-s3-rclone:latest
+    ```
+  - 在 `volume-s3` 配置中指定：
+    ```yaml
+    environment:
+      - VOLS3_RCLONE_IMAGE=<your-registry>/volume-s3-rclone:latest
+      - VOLS3_ALLOW_OTHER=true
+    ```
+  - 注意：仅当需要非 root 访问挂载点时才需要 `allow_other`；root 访问无需该镜像。
+
 ### 清理与自动创建
 | 变量 | 说明 | 默认 |
 | --- | --- | --- |
@@ -238,6 +254,18 @@ scrape_configs:
 
 ## 无代理直跑（去 supervisor）
 - 当 `VOLS3_PROXY_ENABLE=false`（默认）时，容器入口将直接 `exec volume-ops`，不再启动 supervisor。
+
+---
+
+## 归因与免责声明（rclone）
+- 本项目的 mounter 基于 `rclone`（MIT 许可）实现，部分镜像/功能依赖官方 `rclone/rclone` 镜像。
+- 我们提供了自建镜像 `volume-s3-rclone` 的 Dockerfile（仅写入 `/etc/fuse.conf` 的 `user_allow_other`），方便在需要 `allow_other` 的场景使用。
+- 归因：
+  - 源码与镜像来源：`https://github.com/rclone/rclone`
+  - 许可：MIT（以上游仓库声明为准）
+- 免责声明：
+  - `volume-s3-rclone` 为社区自建镜像，非 rclone 官方发行版；仅用于与本项目集成的便利性。
+  - 使用包含 “rclone” 的命名仅为说明性引用，不代表官方背书；请勿将其用于误导性的品牌传播。
 
 ---
 
