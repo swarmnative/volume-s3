@@ -15,6 +15,12 @@ if [ "$(id -u)" = "0" ]; then
       addgroup app "$GRP_NAME" >/dev/null 2>&1 || true
     fi
   fi
+  # Prefer /var/run/docker.sock, fallback to /run/docker.sock
+  if [ -S /var/run/docker.sock ]; then
+    export DOCKER_HOST=unix:///var/run/docker.sock
+  elif [ -S /run/docker.sock ]; then
+    export DOCKER_HOST=unix:///run/docker.sock
+  fi
   # re-exec as app preserving env, initialize supplementary groups
   exec setpriv --reuid app --regid app --init-groups /entrypoint.sh "$@"
 fi
