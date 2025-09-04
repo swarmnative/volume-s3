@@ -61,11 +61,14 @@ type Config struct {
 	ImageCleanupEnabled bool
 	ImageRetentionDays  int
 	ImageKeepRecent     int
+	// Optional remote manager Docker host for reading Service specs from workers
+	ManagerDockerHost   string
 }
 
 type Controller struct {
 	ctx           context.Context
 	cli           *client.Client
+	managerCli    *client.Client
 	cfg           Config
 	lastImagePull time.Time
 	lastImageID   string
@@ -91,7 +94,15 @@ func New(ctx context.Context, cfg Config) (*Controller, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Controller{ctx: ctx, cli: cli, cfg: cfg, eventCh: make(chan struct{}, 1)}, nil
+	var mcli *client.Client
+	if strings.TrimSpace(cfg.ManagerDockerHost) != "" {
+		if c2, err := client.NewClientWithOpts(client.WithHost(cfg.ManagerDockerHost), client.WithAPIVersionNegotiation()); err == nil {
+			mcli = c2
+		} else {
+			slog.Warn("manager docker host client init failed", "host", cfg.ManagerDockerHost, "error", err)
+		}
+	}
+	return &Controller{ctx: ctx, cli: cli, managerCli: mcli, cfg: cfg, eventCh: make(chan struct{}, 1)}, nil
 }
 
 func (c *Controller) Run() {

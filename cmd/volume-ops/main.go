@@ -55,6 +55,7 @@ func main() {
 		ImageCleanupEnabled: getenv("VOLS3_IMAGE_CLEANUP_ENABLED", "true") == "true",
 		ImageRetentionDays:  getenvInt("VOLS3_IMAGE_RETENTION_DAYS", 14),
 		ImageKeepRecent:     getenvInt("VOLS3_IMAGE_KEEP_RECENT", 2),
+		ManagerDockerHost:   getenv("VOLS3_MANAGER_DOCKER_HOST", ""),
 	}
 
 	// --validate-config fast path
